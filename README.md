@@ -1,3 +1,4 @@
+<img width="846" height="718" alt="Snímek obrazovky 2026-05-12 235325" src="https://github.com/user-attachments/assets/16883de8-a7d2-429a-85bd-cd72004bd4ea" />
 # 🎵 Spotify přehrávač na ESP32-C3 s ILI9341 displejem
 
 > Školní projekt – stolní Spotify přehrávač s TFT displejem, obalem alba a ovládáním jediným tlačítkem.
