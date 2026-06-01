@@ -1,1 +1,766 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <time.h>
+#include <TJpg_Decoder.h>
 
+// ===== PINY =====
+#define TFT_CS   7
+#define TFT_DC   8
+#define TFT_RST  10
+#define TFT_MOSI 6
+#define TFT_SCLK 4
+#define TFT_MISO 5
+
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+
+// ===== VYPLŇ SVOJE ÚDAJE =====
+const char* ssid          = "Wifi Jmeno";
+const char* password      = "Wifi Heslo";          // <-- DOPLŇ
+const char* clientId      = "SPOTIFY client ID";
+const char* clientSecret  = "Spotify secret ID";        // <-- DOPLŇ
+const char* refreshToken  = "Tvuj vygenerovany RT z python scriptu";        // <-- DOPLŇ
+
+// URL tapety (320×240 JPEG)
+const char* wallpaperUrl   = "pozadi (musi byt JPG a 320x240";  // <-- DOPLŇ
+
+// ===== TLAČÍTKO =====
+#define BUTTON_PIN   0
+unsigned long buttonDownTime = 0;
+unsigned long lastButtonRelease = 0;
+int clickCount = 0;
+bool buttonPressed = false;
+bool longPressHandled = false;
+const unsigned long doubleClickInterval = 400;   // do 400 ms druhé kliknutí
+const unsigned long longPressDuration = 800;     // podržení delší než 800 ms = back
+
+// ===== SPOTIFY API =====
+const char* spotifyHost = "api.spotify.com";
+WiFiClientSecure client;
+WiFiClientSecure artClient;
+WiFiClientSecure wallpaperClient;
+
+String accessToken = "";
+String trackName = "No track";
+String lastTrackName = "";
+String artistName = "Unknown";
+String lastArtistName = "";
+String albumArtUrl = "";
+String lastAlbumArtUrl = "";
+String drawnArtUrl = "";
+int durationMs = 0;
+int progressMs = 0;
+bool isPlaying = false;
+bool lastIsPlaying = false;
+
+unsigned long lastTokenRefresh = 0;
+unsigned long lastTrackUpdate = 0;
+unsigned long lastProgressUpdate = 0;
+unsigned long lastClockUpdate = 0;
+const unsigned long refreshInterval = 1500;
+const unsigned long progressInterval = 500;
+const unsigned long clockInterval = 1000;
+
+// Tapeta
+uint8_t* wallpaperData = nullptr;
+size_t wallpaperSize = 0;
+
+// Barvy pozadí z tapety (budou naplněny při prvním vykreslení)
+uint16_t wallpaperClockBg = 0x0000;     // pro hodiny
+uint16_t wallpaperProgressBg = 0x0000; // pro progress bar
+uint16_t wallpaperArtBg = 0x0000;      // pro oblast alba
+
+// Keš pro obal alba
+uint8_t* currentArtData = nullptr;
+size_t currentArtSize = 0;
+
+// Barvy
+#define SPOTIFY_BG    0x121212
+#define SPOTIFY_GREEN 0x1DB954
+#define SPOTIFY_WHITE 0xFFFFFF
+#define SPOTIFY_GREY  0xB3B3B3
+#define SPOTIFY_DARK  0x282828
+#define PURE_BLACK    0x0000
+
+// Layout (podle tebe)
+#define TITLE_X       20
+#define TITLE_Y       10
+#define ART_SIZE      90
+#define ART_X         140
+#define ART_Y         30
+#define PROGRESS_X    10
+#define PROGRESS_Y    230
+#define PROGRESS_W    300
+#define PROGRESS_H    3
+#define ARTIST_Y      220
+
+// Hodiny
+#define CLOCK_X       280
+#define CLOCK_Y       0
+
+// ===== REFRESH TOKENU =====
+bool refreshAccessToken() {
+  if (accessToken.length() > 0 && millis() - lastTokenRefresh < 3300000) return true;
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  Serial.println("\n--- Refreshing token ---");
+  client.stop();
+  client.setInsecure();
+  if (!client.connect("accounts.spotify.com", 443)) {
+    Serial.println("Connection to accounts.spotify.com failed");
+    return false;
+  }
+
+  String body = "grant_type=refresh_token&refresh_token=" + String(refreshToken) +
+                "&client_id=" + String(clientId) +
+                "&client_secret=" + String(clientSecret);
+  client.println("POST /api/token HTTP/1.1");
+  client.println("Host: accounts.spotify.com");
+  client.println("Content-Type: application/x-www-form-urlencoded");
+  client.print("Content-Length: ");
+  client.println(body.length());
+  client.println("Connection: close");
+  client.println();
+  client.println(body);
+
+  while (client.connected() && !client.available()) delay(1);
+
+  String statusLine = client.readStringUntil('\n');
+  Serial.println("Token server status: " + statusLine);
+
+  while (client.available()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+
+  String payload = client.readString();
+  Serial.println("Token server response: " + payload);
+
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(doc, payload);
+  if (error) {
+    Serial.print("JSON parse error: ");
+    Serial.println(error.c_str());
+    return false;
+  }
+
+  accessToken = doc["access_token"].as<String>();
+  if (accessToken.length() > 0) {
+    Serial.println("New access token (first 10 chars): " + accessToken.substring(0, 10));
+    lastTokenRefresh = millis();
+    return true;
+  } else {
+    Serial.println("No access_token in response!");
+    return false;
+  }
+}
+
+// ===== ZÍSKÁNÍ SKLADBY =====
+bool fetchCurrentTrack() {
+  if (!refreshAccessToken()) return false;
+  if (accessToken.length() == 0) return false;
+
+  client.stop();
+  client.setInsecure();
+  if (!client.connect(spotifyHost, 443)) {
+    Serial.println("Connection to api.spotify.com failed");
+    return false;
+  }
+
+  client.println("GET /v1/me/player/currently-playing HTTP/1.1");
+  client.println("Host: api.spotify.com");
+  client.println("Authorization: Bearer " + accessToken);
+  client.println("Connection: close");
+  client.println();
+
+  while (client.connected() && !client.available()) delay(1);
+
+  String statusLine = client.readStringUntil('\n');
+  while (client.available()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+
+  String payload = client.readString();
+  if (payload.length() == 0 || payload == "{}") {
+    trackName = "No device";
+    artistName = "Start Spotify";
+    albumArtUrl = "";
+    isPlaying = false;
+    lastTrackUpdate = millis();
+    return (trackName != lastTrackName);
+  }
+
+  DynamicJsonDocument doc(4096);
+  DeserializationError error = deserializeJson(doc, payload);
+  if (error) return false;
+
+  isPlaying = doc["is_playing"].as<bool>();
+  JsonObject item = doc["item"];
+  if (item.isNull()) {
+    trackName = "No track";
+    artistName = "";
+    albumArtUrl = "";
+    lastTrackUpdate = millis();
+    return (trackName != lastTrackName);
+  }
+
+  trackName = item["name"].as<String>();
+  JsonArray artists = item["artists"];
+  artistName = "";
+  for (JsonObject artist : artists) {
+    if (artistName.length() > 0) artistName += ", ";
+    artistName += artist["name"].as<String>();
+  }
+  durationMs = item["duration_ms"] | 0;
+  progressMs = doc["progress_ms"] | 0;
+
+  JsonArray images = item["album"]["images"];
+  if (images.size() >= 2) {
+    albumArtUrl = images[1]["url"].as<String>();
+  } else if (images.size() == 1) {
+    albumArtUrl = images[0]["url"].as<String>();
+  } else {
+    albumArtUrl = "";
+  }
+
+  lastTrackUpdate = millis();
+
+  bool changed = (trackName != lastTrackName || albumArtUrl != lastAlbumArtUrl ||
+                  artistName != lastArtistName || isPlaying != lastIsPlaying);
+  lastTrackName = trackName;
+  lastArtistName = artistName;
+  lastAlbumArtUrl = albumArtUrl;
+  lastIsPlaying = isPlaying;
+  return changed;
+}
+
+// ===== ODESLÁNÍ PŘÍKAZU =====
+void sendSpotifyCommand(String command) {
+  if (!refreshAccessToken()) return;
+  if (accessToken.length() == 0) return;
+
+  client.stop();
+  client.setInsecure();
+  if (!client.connect(spotifyHost, 443)) return;
+
+  String url;
+  if (command == "next") url = "/v1/me/player/next";
+  else if (command == "previous") url = "/v1/me/player/previous";
+  else if (command == "play") url = "/v1/me/player/play";
+  else if (command == "pause") url = "/v1/me/player/pause";
+  else return;
+
+  client.println("POST " + url + " HTTP/1.1");
+  client.println("Host: api.spotify.com");
+  client.println("Authorization: Bearer " + accessToken);
+  client.println("Content-Length: 0");
+  client.println("Connection: close");
+  client.println();
+
+  while (client.connected() && !client.available()) delay(1);
+  String response = client.readStringUntil('\n');
+  Serial.println("Command " + command + " sent, response: " + response);
+}
+
+// ===== STAHOVÁNÍ TAPETY =====
+bool downloadWallpaper(const char* url) {
+  if (wallpaperData) free(wallpaperData);
+  wallpaperData = nullptr;
+  wallpaperSize = 0;
+
+  String host;
+  String path;
+  String urlStr(url);
+  int slashPos = urlStr.indexOf('/', 8);
+  if (slashPos > 0) {
+    host = urlStr.substring(8, slashPos);
+    path = urlStr.substring(slashPos);
+  } else {
+    return false;
+  }
+
+  Serial.println("Downloading wallpaper...");
+  wallpaperClient.stop();
+  wallpaperClient.setInsecure();
+  if (!wallpaperClient.connect(host.c_str(), 443)) {
+    Serial.println("Wallpaper connect failed");
+    return false;
+  }
+
+  wallpaperClient.println("GET " + path + " HTTP/1.1");
+  wallpaperClient.println("Host: " + host);
+  wallpaperClient.println("Connection: close");
+  wallpaperClient.println();
+
+  while (wallpaperClient.connected() && !wallpaperClient.available()) delay(1);
+  String line = wallpaperClient.readStringUntil('\n');
+  while (wallpaperClient.available()) {
+    line = wallpaperClient.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+
+  const size_t maxSize = 40000;
+  uint8_t* buf = (uint8_t*)malloc(maxSize);
+  if (!buf) {
+    wallpaperClient.stop();
+    return false;
+  }
+
+  size_t total = 0;
+  while (wallpaperClient.connected() && total < maxSize) {
+    int available = wallpaperClient.available();
+    if (available > 0) {
+      size_t toRead = min((size_t)available, maxSize - total);
+      int len = wallpaperClient.read(buf + total, toRead);
+      if (len <= 0) break;
+      total += len;
+    } else {
+      delay(1);
+    }
+  }
+  wallpaperClient.stop();
+
+  if (total == 0) {
+    free(buf);
+    return false;
+  }
+
+  wallpaperData = buf;
+  wallpaperSize = total;
+  Serial.printf("Wallpaper loaded: %d bytes\n", total);
+  return true;
+}
+
+// ===== VYKRESLENÍ TAPETY S ODBĚREM VZORKŮ =====
+bool wallpaper_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
+  tft.drawRGBBitmap(x, y, bitmap, w, h);
+
+  // Vzorek pro hodiny
+  if (x <= CLOCK_X+20 && (x + w) > CLOCK_X+20 && y <= CLOCK_Y+6 && (y + h) > CLOCK_Y+6) {
+    int px = CLOCK_X+20 - x;
+    int py = CLOCK_Y+6 - y;
+    if (px >= 0 && px < w && py >= 0 && py < h) {
+      wallpaperClockBg = bitmap[py * w + px];
+    }
+  }
+
+  // Vzorek pro progress bar (uprostřed, y = PROGRESS_Y + PROGRESS_H/2)
+  if (x <= PROGRESS_X + PROGRESS_W/2 && (x + w) > PROGRESS_X + PROGRESS_W/2 &&
+      y <= PROGRESS_Y + PROGRESS_H/2 && (y + h) > PROGRESS_Y + PROGRESS_H/2) {
+    int px = PROGRESS_X + PROGRESS_W/2 - x;
+    int py = PROGRESS_Y + PROGRESS_H/2 - y;
+    if (px >= 0 && px < w && py >= 0 && py < h) {
+      wallpaperProgressBg = bitmap[py * w + px];
+    }
+  }
+
+  // Vzorek pro album art (střed plochy ART_X, ART_Y, ART_SIZE)
+  if (x <= ART_X + ART_SIZE/2 && (x + w) > ART_X + ART_SIZE/2 &&
+      y <= ART_Y + ART_SIZE/2 && (y + h) > ART_Y + ART_SIZE/2) {
+    int px = ART_X + ART_SIZE/2 - x;
+    int py = ART_Y + ART_SIZE/2 - y;
+    if (px >= 0 && px < w && py >= 0 && py < h) {
+      wallpaperArtBg = bitmap[py * w + px];
+    }
+  }
+
+  return true;
+}
+
+bool drawWallpaper() {
+  if (!wallpaperData || wallpaperSize == 0) return false;
+  TJpgDec.setJpgScale(1);
+  TJpgDec.setCallback(wallpaper_output);
+  JRESULT res = TJpgDec.drawJpg(0, 0, wallpaperData, wallpaperSize);
+  return (res == JDR_OK);
+}
+
+// ===== ALBUM ART =====
+bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
+  if (y >= tft.height()) return false;
+  tft.drawRGBBitmap(x, y, bitmap, w, h);
+  return true;
+}
+
+bool downloadArtData(const String& url) {
+  if (url.length() == 0) return false;
+
+  if (currentArtData) {
+    free(currentArtData);
+    currentArtData = nullptr;
+    currentArtSize = 0;
+  }
+
+  String host;
+  String path;
+  int slashPos = url.indexOf('/', 8);
+  if (slashPos > 0) {
+    host = url.substring(8, slashPos);
+    path = url.substring(slashPos);
+  } else {
+    return false;
+  }
+
+  Serial.println("Downloading art: " + host + path);
+  artClient.stop();
+  artClient.setInsecure();
+  if (!artClient.connect(host.c_str(), 443)) {
+    Serial.println("Art connect failed");
+    return false;
+  }
+
+  artClient.println("GET " + path + " HTTP/1.1");
+  artClient.println("Host: " + host);
+  artClient.println("Connection: close");
+  artClient.println();
+
+  while (artClient.connected() && !artClient.available()) delay(1);
+  String line = artClient.readStringUntil('\n');
+  while (artClient.available()) {
+    line = artClient.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+
+  const size_t maxSize = 30000;
+  uint8_t* buf = (uint8_t*)malloc(maxSize);
+  if (!buf) {
+    artClient.stop();
+    return false;
+  }
+
+  size_t total = 0;
+  while (artClient.connected() && total < maxSize) {
+    int available = artClient.available();
+    if (available > 0) {
+      size_t toRead = min((size_t)available, maxSize - total);
+      int len = artClient.read(buf + total, toRead);
+      if (len <= 0) break;
+      total += len;
+    } else {
+      delay(1);
+    }
+  }
+  artClient.stop();
+
+  if (total == 0) {
+    free(buf);
+    return false;
+  }
+
+  currentArtData = buf;
+  currentArtSize = total;
+  Serial.printf("Art loaded: %d bytes\n", total);
+  return true;
+}
+
+bool drawArtFromCache(int16_t x, int16_t y, int16_t size) {
+  if (!currentArtData || currentArtSize == 0) return false;
+
+  TJpgDec.setJpgScale(2);
+  TJpgDec.setCallback(tft_output);
+
+  int drawX = x + (size - 75) / 2;
+  int drawY = y + (size - 75) / 2;
+
+  JRESULT res = TJpgDec.drawJpg(drawX, drawY, currentArtData, currentArtSize);
+  return (res == JDR_OK);
+}
+
+// ===== POMOCNÉ KRESLENÍ =====
+void fillRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r, uint16_t color) {
+  tft.fillRoundRect(x, y, w, h, r, color);
+}
+
+// ===== HODINY (pozadí z tapety) =====
+void updateClock() {
+  time_t now = time(nullptr);
+  struct tm* timeinfo = localtime(&now);
+  char buf[6];
+  sprintf(buf, "%02d:%02d", timeinfo->tm_hour, timeinfo->tm_min);
+
+  tft.fillRect(CLOCK_X, CLOCK_Y, 40, 12, wallpaperClockBg);
+  tft.setTextColor(SPOTIFY_GREY);
+  tft.setTextSize(1);
+  tft.setCursor(CLOCK_X, CLOCK_Y);
+  tft.print(buf);
+}
+
+// ===== PROGRESS BAR + INTERPRET (pozadí splývá s tapetou) =====
+void updateProgress() {
+  int bx = PROGRESS_X, by = PROGRESS_Y, bw = PROGRESS_W, bh = PROGRESS_H;
+  float prog = (durationMs > 0) ? (float)progressMs / durationMs : 0.0f;
+
+  // Vyčistit oblast barvou tapety – dokonalé splynutí
+  tft.fillRect(bx, by - 14, bw, bh + 14 + 20, wallpaperProgressBg);
+
+  // Pozadí progress baru
+  fillRoundRect(bx, by, bw, bh, bh/2, wallpaperProgressBg);
+  int filledW = (int)(bw * prog);
+  if (filledW > 0) {
+    fillRoundRect(bx, by, filledW, bh, bh/2, SPOTIFY_GREEN);
+    int16_t thumbX = bx + filledW;
+    if (thumbX > bx + bh/2 && thumbX < bx + bw - bh/2) {
+      tft.fillCircle(thumbX, by + bh/2, bh/2 + 2, SPOTIFY_WHITE);
+      tft.fillCircle(thumbX, by + bh/2, bh/2 - 1, SPOTIFY_GREEN);
+    }
+  }
+
+  // Časy
+  int cs = progressMs / 1000;
+  int ts = durationMs / 1000;
+  char buf[20];
+  sprintf(buf, "%d:%02d", cs/60, cs%60);
+  tft.setTextColor(SPOTIFY_GREY);
+  tft.setTextSize(1);
+  tft.setCursor(bx, by - 12);
+  tft.print(buf);
+
+  sprintf(buf, "%d:%02d", ts/60, ts%60);
+  int16_t textW = strlen(buf) * 6;
+  tft.setCursor(bx + bw - textW, by - 12);
+  tft.print(buf);
+
+  // Interpret
+  tft.setTextColor(SPOTIFY_GREY);
+  tft.setTextSize(1);
+  String da = artistName.length() > 25 ? artistName.substring(0, 22) + "..." : artistName;
+  int16_t artistW = da.length() * 6;
+  tft.setCursor((320 - artistW) / 2, ARTIST_Y);
+  tft.print(da);
+}
+
+// ===== CELÉ UI =====
+void drawUIFull() {
+  // 1. Tapeta (zároveň se naplní vzorky barev)
+  if (!drawWallpaper()) {
+    tft.fillScreen(PURE_BLACK);
+  }
+
+  // 2. Název skladby
+  tft.setTextSize(2);
+  tft.setTextColor(SPOTIFY_WHITE);
+  tft.setCursor(TITLE_X, TITLE_Y);
+  String dt = trackName.length() > 25 ? trackName.substring(0, 20) + ".." : trackName;
+  tft.print(dt);
+
+  // Stavová tečka
+  int dotX = TITLE_X + dt.length() * 12 + 14;
+  if (dotX > 280) dotX = 280;
+  int dotY = TITLE_Y + 8;
+  tft.fillCircle(dotX, dotY, 5, isPlaying ? SPOTIFY_GREEN : SPOTIFY_GREY);
+
+  // 3. Hodiny
+  updateClock();
+
+  // 4. Album art – při změně vyčistíme oblast barvou tapety
+  if (albumArtUrl != drawnArtUrl) {
+    // Vymazat předchozí obrázek barvou pozadí
+    tft.fillRect(ART_X, ART_Y, ART_SIZE, ART_SIZE, wallpaperArtBg);
+    if (albumArtUrl.length() > 0) {
+      downloadArtData(albumArtUrl);
+    } else {
+      if (currentArtData) {
+        free(currentArtData);
+        currentArtData = nullptr;
+        currentArtSize = 0;
+      }
+    }
+    drawnArtUrl = albumArtUrl;
+  }
+
+  if (currentArtData && currentArtSize > 0) {
+    drawArtFromCache(ART_X, ART_Y, ART_SIZE);
+  }
+  // Když není obrázek, necháme tapetu, jak je – nic nekreslíme.
+
+  // 5. Progress bar
+  updateProgress();
+}
+
+// ===== ZPRACOVÁNÍ TLAČÍTKA =====
+void handleButton() {
+  bool state = digitalRead(BUTTON_PIN);
+  unsigned long now = millis();
+
+  // Detekce stisku
+  if (state == LOW && !buttonPressed) {
+    buttonPressed = true;
+    buttonDownTime = now;
+    longPressHandled = false;
+  }
+
+  // Detekce uvolnění
+  if (state == HIGH && buttonPressed) {
+    buttonPressed = false;
+    unsigned long pressDuration = now - buttonDownTime;
+
+    if (pressDuration >= longPressDuration) {
+      // Dlouhé podržení = back
+      Serial.println("Button: long press -> previous");
+      sendSpotifyCommand("previous");
+      delay(200);
+      fetchCurrentTrack();
+      drawUIFull();
+    } else {
+      // Krátké stisknutí – počítáme kliky
+      clickCount++;
+      if (clickCount == 1) {
+        lastButtonRelease = now;
+      }
+      if (clickCount == 2) {
+        // Dvojité kliknutí = next
+        Serial.println("Button: double click -> next");
+        sendSpotifyCommand("next");
+        delay(200);
+        fetchCurrentTrack();
+        drawUIFull();
+        clickCount = 0;
+      }
+    }
+  }
+
+  // Pokud je 1 klik a vypršel interval pro druhé kliknutí, vykoná se play/pause
+  if (clickCount == 1 && (now - lastButtonRelease) > doubleClickInterval) {
+    Serial.println("Button: single click -> play/pause");
+    if (isPlaying) sendSpotifyCommand("pause");
+    else sendSpotifyCommand("play");
+    delay(200);
+    fetchCurrentTrack();
+    drawUIFull();
+    clickCount = 0;
+  }
+}
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI);
+  tft.begin();
+  tft.setSPISpeed(40000000);
+  tft.setRotation(1);
+
+  // Inicializace tlačítka
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  // Český čas
+  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+  tzset();
+
+  tft.fillScreen(PURE_BLACK);
+  tft.setTextColor(SPOTIFY_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10, 10);
+  tft.print("WiFi...");
+
+  WiFi.begin(ssid, password);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    tft.fillScreen(PURE_BLACK);
+    tft.setTextColor(SPOTIFY_GREEN);
+    tft.setCursor(10, 60);
+    tft.print("WiFi FAILED");
+    while (1) delay(1000);
+  }
+
+  tft.fillScreen(PURE_BLACK);
+  tft.setCursor(10, 10);
+  tft.print("WiFi OK");
+
+  tft.setCursor(10, 40);
+  tft.print("Time...");
+  configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
+  time_t now = 0;
+  int timeout = 0;
+  while (time(&now) < 1000000000 && timeout < 20) {
+    delay(500);
+    timeout++;
+  }
+  tft.setCursor(10, 40);
+  tft.print("Time OK      ");
+
+  tft.setCursor(10, 70);
+  tft.print("Wallpaper...");
+  if (downloadWallpaper(wallpaperUrl)) {
+    tft.print("OK");
+  } else {
+    tft.print("FAILED");
+  }
+  delay(1000);
+
+  tft.setCursor(10, 100);
+  tft.print("Spotify...");
+  if (refreshAccessToken()) {
+    tft.print("OK");
+  } else {
+    tft.print("FAILED");
+  }
+  delay(1000);
+
+  fetchCurrentTrack();
+  lastTrackName = trackName;
+  lastArtistName = artistName;
+  lastAlbumArtUrl = albumArtUrl;
+  lastIsPlaying = isPlaying;
+  drawnArtUrl = "";
+  drawUIFull();
+}
+
+void loop() {
+  // Ovládání tlačítkem
+  handleButton();
+
+  // Sériové ovládání
+  if (Serial.available()) {
+    char cmd = Serial.read();
+    switch (cmd) {
+      case 'p':
+        if (isPlaying) sendSpotifyCommand("pause");
+        else sendSpotifyCommand("play");
+        delay(300);
+        fetchCurrentTrack();
+        drawUIFull();
+        break;
+      case 'n':
+        sendSpotifyCommand("next");
+        delay(300);
+        fetchCurrentTrack();
+        drawUIFull();
+        break;
+      case 'b':
+        sendSpotifyCommand("previous");
+        delay(300);
+        fetchCurrentTrack();
+        drawUIFull();
+        break;
+    }
+  }
+
+  if (millis() - lastTrackUpdate > refreshInterval) {
+    if (fetchCurrentTrack()) {
+      drawUIFull();
+    }
+  }
+
+  if (millis() - lastProgressUpdate > progressInterval) {
+    updateProgress();
+    lastProgressUpdate = millis();
+  }
+
+  if (millis() - lastClockUpdate > clockInterval) {
+    updateClock();
+    lastClockUpdate = millis();
+  }
+}
