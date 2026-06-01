@@ -1,6 +1,6 @@
 # 🎵 Spotify přehrávač na ESP32-C3 s ILI9341 displejem
 
-> Školní projekt – stolní Spotify přehrávač s TFT displejem, obalem alba a ovládáním jediným tlačítkem.
+>Ovládej Spotify na PC nebo mobilu pomocí tohoto přehravače , mužete vidět a ovládat co se právě děje s vašemi songy.
 
 ![ESP32](https://img.shields.io/badge/ESP32--C3-Espressif-red?style=flat-square&logo=espressif)
 ![Arduino](https://img.shields.io/badge/Arduino_IDE-C%2B%2B-blue?style=flat-square&logo=arduino)
