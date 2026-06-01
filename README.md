@@ -252,8 +252,9 @@ const char* wallpaperUrl = "https://example.com/pozadi.jpg"; // 320×240 JPEG
 
 ---
 
-## 📝 Licence
+## 📝 Licence a zdroje
 
 Tento projekt je určen pro **vzdělávací účely**.
 Můžeš ho libovolně používat, upravovat a šířit. 🎓
 Kod i většina tohohle repozitář bylo vytvořeno pomocí mě i Deepseeku (Goat podcenovane AI)
+Nebyl použit žadný kod od jiné osoby , co jsem koukal tak existují i podobné projekty ale žadný není s volbou mého hardwaru. :)
