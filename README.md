@@ -94,7 +94,7 @@ Všechny jsou dostupné přes **Library Manager**:
 
 **1. Naklonuj repozitář**
 ```bash
-git clone https://github.com/tvuj-username/spotify-esp32.git
+git clone https://github.com/Jaromirrr/ESP32-Spotify-controller.git
 ```
 
 **2. Nainstaluj knihovny** v Arduino IDE (viz tabulka výše)
