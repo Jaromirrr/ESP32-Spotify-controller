@@ -1,4 +1,3 @@
-<img width="846" height="718" alt="Snímek obrazovky 2026-05-12 235325" src="https://github.com/user-attachments/assets/16883de8-a7d2-429a-85bd-cd72004bd4ea" />
 # 🎵 Spotify přehrávač na ESP32-C3 s ILI9341 displejem
 
 > Školní projekt – stolní Spotify přehrávač s TFT displejem, obalem alba a ovládáním jediným tlačítkem.
@@ -12,7 +11,12 @@
 
 ## 📸 Ukázka
 
-> *(Sem vlož reálné fotky svého zařízení – displej v akci s obalem alba a tapetou)*
+ <img width="540" height="480" alt="image" src="https://github.com/user-attachments/assets/88b0bb10-8663-421d-9d15-7a499a59b96e" />
+
+https://github.com/user-attachments/assets/dcbdaed0-e5b0-4d7f-b7e9-365dfb3e47f3
+
+
+
 
 ---
 
@@ -103,8 +107,8 @@ git clone https://github.com/tvuj-username/spotify-esp32.git
 - `user-read-currently-playing`
 - `user-modify-playback-state`
 
-Použij přiložený skript `get_spotify_token.py` nebo online nástroj:
-👉 [alecchendev.github.io/spotify-refresh-token](https://alecchendev.github.io/spotify-refresh-token/)
+Použij přiložený skript `get_spotify_token.py` 
+
 
 **5. Vyplň své údaje v kódu**
 ```cpp
